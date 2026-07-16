@@ -1,3 +1,18 @@
+# PyTorch's default PyPI wheels track whatever the newest CUDA toolkit is
+# (currently CUDA 13.x) -- newer than the driver on many still-current
+# RunPod GPU tiers (A40/A5000/A6000-class cards commonly run drivers
+# capped around CUDA 12.x), so a plain `pip install torch` can silently
+# install a build the driver can't initialize, and torch falls back to
+# CPU with only a warning, not a hard error, unless you're watching for it.
+# Pinning the index to the cu128 wheel set (compatible with driver
+# >=525.60, i.e. any CUDA-12.x-capable driver) makes `pip install -r
+# requirements.txt` resolve to a build that actually runs on this
+# project's target hardware instead of whatever's newest today. If you're
+# on a card with a genuinely newer driver (CUDA 13+), drop this line and
+# let torch resolve normally.
+--index-url https://download.pytorch.org/whl/cu128
+--extra-index-url https://pypi.org/simple
+
 torch>=2.1.0
 transformers>=5.0.0  # src/hf_cache_bridge.py targets the DynamicLayer Cache API introduced in 5.x
 datasets>=2.18.0

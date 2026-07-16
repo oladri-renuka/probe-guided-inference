@@ -20,6 +20,7 @@ Usage:
     python scripts/verify_setup.py
 """
 
+import asyncio
 import sys
 from pathlib import Path
 
@@ -105,11 +106,15 @@ def main():
 
     # 5. Single-sequence parity: hand-built cache bridge vs model.generate()
     print("\n[5/6] Verifying batched cache bridge parity (single sequence, 15 tokens)...")
-    _check_single_sequence_parity(model, tokenizer, errors)
+    # GenerationRequest.result is an asyncio.Future created via
+    # asyncio.get_running_loop() (see src/queue.py) -- constructing one
+    # outside a running loop raises RuntimeError, so these checks need
+    # asyncio.run() even though neither actually awaits anything.
+    asyncio.run(_check_single_sequence_parity(model, tokenizer, errors))
 
     # 6. Multi-sequence parity: TWO different-length prompts decoded together
     print("\n[6/6] Verifying batched cache bridge parity (two sequences, different lengths)...")
-    _check_multi_sequence_parity(model, tokenizer, errors)
+    asyncio.run(_check_multi_sequence_parity(model, tokenizer, errors))
 
     print("\n" + "=" * 60)
     if errors:
@@ -126,8 +131,7 @@ def main():
     print("=" * 60)
 
 
-@torch.no_grad()
-def _check_single_sequence_parity(model, tokenizer, errors: list) -> None:
+async def _check_single_sequence_parity(model, tokenizer, errors: list) -> None:
     prompt_text = tokenizer.apply_chat_template(
         [{"role": "user", "content": "What is 17 * 24? Answer directly."}],
         add_generation_prompt=True, tokenize=False,
@@ -135,21 +139,22 @@ def _check_single_sequence_parity(model, tokenizer, errors: list) -> None:
     prompt_ids = tokenizer(prompt_text, return_tensors="pt")["input_ids"][0].tolist()
     n_tokens = 15
 
-    ref_input = torch.tensor([prompt_ids], device=model.device)
-    ref_output = model.generate(
-        ref_input, max_new_tokens=n_tokens, do_sample=False, temperature=None, top_p=None,
-    )
-    ref_tokens = ref_output[0, len(prompt_ids):].tolist()
+    with torch.no_grad():
+        ref_input = torch.tensor([prompt_ids], device=model.device)
+        ref_output = model.generate(
+            ref_input, max_new_tokens=n_tokens, do_sample=False, temperature=None, top_p=None,
+        )
+        ref_tokens = ref_output[0, len(prompt_ids):].tolist()
 
-    cache = BatchedSequenceCache()
-    capture = LayerActivationCapture(model, settings.probe_layer)
-    req = GenerationRequest(prompt=prompt_text, max_tokens=n_tokens, prompt_ids=prompt_ids)
-    model_runner.run_prefill(model, cache, capture, req, tokenizer.eos_token_id, n_tokens)
-    for _ in range(n_tokens - 1):
-        if req.n_generated >= n_tokens:
-            break
-        model_runner.run_decode_step(model, cache, capture, None, [req], tokenizer.eos_token_id, n_tokens)
-    capture.remove()
+        cache = BatchedSequenceCache()
+        capture = LayerActivationCapture(model, settings.probe_layer)
+        req = GenerationRequest(prompt=prompt_text, max_tokens=n_tokens, prompt_ids=prompt_ids)
+        model_runner.run_prefill(model, cache, capture, req, tokenizer.eos_token_id, n_tokens)
+        for _ in range(n_tokens - 1):
+            if req.n_generated >= n_tokens:
+                break
+            model_runner.run_decode_step(model, cache, capture, None, [req], tokenizer.eos_token_id, n_tokens)
+        capture.remove()
 
     bridge_tokens = req.generated_ids[:n_tokens]
     if bridge_tokens == ref_tokens[:len(bridge_tokens)]:
@@ -163,8 +168,7 @@ def _check_single_sequence_parity(model, tokenizer, errors: list) -> None:
         )
 
 
-@torch.no_grad()
-def _check_multi_sequence_parity(model, tokenizer, errors: list) -> None:
+async def _check_multi_sequence_parity(model, tokenizer, errors: list) -> None:
     prompts = [
         "What is 2+2? Answer directly.",
         "Write the first five prime numbers, separated by commas, and nothing else.",
@@ -178,26 +182,27 @@ def _check_multi_sequence_parity(model, tokenizer, errors: list) -> None:
         for p in prompts
     ]
 
-    ref_tokens_list = []
-    for prompt_ids in prompt_ids_list:
-        ref_input = torch.tensor([prompt_ids], device=model.device)
-        ref_output = model.generate(ref_input, max_new_tokens=n_tokens, do_sample=False, temperature=None, top_p=None)
-        ref_tokens_list.append(ref_output[0, len(prompt_ids):].tolist())
+    with torch.no_grad():
+        ref_tokens_list = []
+        for prompt_ids in prompt_ids_list:
+            ref_input = torch.tensor([prompt_ids], device=model.device)
+            ref_output = model.generate(ref_input, max_new_tokens=n_tokens, do_sample=False, temperature=None, top_p=None)
+            ref_tokens_list.append(ref_output[0, len(prompt_ids):].tolist())
 
-    cache = BatchedSequenceCache()
-    capture = LayerActivationCapture(model, settings.probe_layer)
-    reqs = [
-        GenerationRequest(prompt=p, max_tokens=n_tokens, prompt_ids=ids)
-        for p, ids in zip(prompts, prompt_ids_list, strict=False)
-    ]
-    for req in reqs:
-        model_runner.run_prefill(model, cache, capture, req, tokenizer.eos_token_id, n_tokens)
-    for _ in range(n_tokens - 1):
-        active = [r for r in reqs if r.n_generated < n_tokens]
-        if not active:
-            break
-        model_runner.run_decode_step(model, cache, capture, None, active, tokenizer.eos_token_id, n_tokens)
-    capture.remove()
+        cache = BatchedSequenceCache()
+        capture = LayerActivationCapture(model, settings.probe_layer)
+        reqs = [
+            GenerationRequest(prompt=p, max_tokens=n_tokens, prompt_ids=ids)
+            for p, ids in zip(prompts, prompt_ids_list, strict=False)
+        ]
+        for req in reqs:
+            model_runner.run_prefill(model, cache, capture, req, tokenizer.eos_token_id, n_tokens)
+        for _ in range(n_tokens - 1):
+            active = [r for r in reqs if r.n_generated < n_tokens]
+            if not active:
+                break
+            model_runner.run_decode_step(model, cache, capture, None, active, tokenizer.eos_token_id, n_tokens)
+        capture.remove()
 
     all_match = True
     for i, (req, ref_tokens) in enumerate(zip(reqs, ref_tokens_list, strict=False)):
