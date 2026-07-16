@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+venv/
+.venv/
+*.egg-info/
+results/*.json
+results/*.png
+results/*.md
+!results/.gitkeep
+checkpoints/
+.DS_Store
+*.pkl
+!probe_weights/*.pkl

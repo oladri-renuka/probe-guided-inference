@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    # CPU-only, no GPU, no real model weights, no HF Hub download -- see
+    # tests/conftest.py: the test suite builds a tiny randomly-initialized
+    # Qwen2ForCausalLM in-process instead. This runs the FULL scheduler,
+    # cache-bridge parity, gate, and queue test suite in well under a
+    # minute. It cannot and does not validate probe AUC or throughput
+    # numbers -- those require the real model on a GPU (see README
+    # "Reproduction") and are not part of this CI job.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Lint
+        run: ruff check .
+      - name: Test
+        run: pytest tests/ -v
