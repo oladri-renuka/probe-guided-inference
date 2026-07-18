@@ -1,11 +1,10 @@
 """
-Aggregates benchmark/routing_eval.py's raw JSON into the comparison this
-project's Definition of Done requires: throughput, accuracy, and token
-savings across baseline / probe_terminate / probe_deprioritize, plus the
-two strategy-specific diagnostics the project doc calls out explicitly --
-false termination rate, and convergent-vs-divergent latency -- both of
-which need a same-run baseline to compute against (see docstrings below
-for why).
+Aggregates benchmark/routing_eval.py's raw JSON into the comparison
+tables: throughput, accuracy, and token savings across baseline /
+probe_terminate / probe_deprioritize, plus two strategy-specific
+diagnostics -- false termination rate, and convergent-vs-divergent
+latency -- both of which need a same-run baseline to compute against (see
+docstrings below for why).
 
 Usage:
     python -m benchmark.report --in-path results/routing_eval.json --out results/report.md
@@ -181,12 +180,6 @@ def format_markdown(all_results: dict) -> str:
             lines.append(f"\nBaseline p50 latency for the SAME (predicted-convergent) requests: "
                           f"{depri['baseline_convergent_p50_s']:.1f}s. "
                           f"probe_deprioritize change: {depri['convergent_p50_improvement_pct']:+.1f}%.")
-            lines.append(
-                "\nThe project's \"positive result\" bar (see README) is +15-25% p50 improvement "
-                "for convergent requests with no accuracy loss. Compare the number above against "
-                "that bar directly, and report whatever it actually is -- including if it's negative "
-                "or inside noise. This project's Definition of Done does not require a positive result."
-            )
 
     return "\n".join(lines)
 

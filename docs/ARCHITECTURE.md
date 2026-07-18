@@ -194,14 +194,14 @@ numbers are produced.
    `probe_deprioritize` could show elevated tail latency or wasted total
    compute from repeated restarts; `benchmark/report.py`'s preemption
    count is the diagnostic for this.
-5. **The probe's AUC (0.612) is not close to the ceiling.**
-   early_detection's own limitations section already says this: 0.612 is
-   statistically significant but not obviously "operationally decisive."
-   This project's Definition of Done does not require
-   `probe_deprioritize` or `probe_terminate` to beat `baseline` -- a
-   negative result (probe signal too weak, or gate overhead cancels the
-   scheduling benefit) is a complete, reportable, and equally honest
-   outcome. See README "What a Null or Negative Result Looks Like."
+5. **The probe's AUC (0.612 in early_detection's original run; 0.567 in
+   this project's own retraining) is not close to the ceiling.**
+   early_detection's own limitations section already notes this: a
+   statistically significant AUC is not the same as an operationally
+   decisive one. `probe_terminate`'s 47.5% false-termination rate (see
+   README "Results") is the direct consequence -- at this AUC, destructive
+   routing decisions are not yet defensible, while non-destructive
+   reordering (`probe_deprioritize`) still is.
 6. **Single model, single hardware target.** Same scope constraint
    early_detection names for itself: whether any of this generalizes past
    DeepSeek-R1-Distill-Qwen-7B on an A5000-class GPU is untested.

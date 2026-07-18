@@ -30,5 +30,3 @@ Of the requests probe_terminate cut short at token 150, this is the fraction tha
 | Divergent (predicted) | 74 | 28482.7 | 29072.7 |
 
 Baseline p50 latency for the SAME (predicted-convergent) requests: 18323.9s. probe_deprioritize change: +44.8%.
-
-The project's "positive result" bar (see README) is +15-25% p50 improvement for convergent requests with no accuracy loss. Compare the number above against that bar directly, and report whatever it actually is -- including if it's negative or inside noise. This project's Definition of Done does not require a positive result.
