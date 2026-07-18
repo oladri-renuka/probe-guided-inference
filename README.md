@@ -1,299 +1,153 @@
 # Probe-Guided Inference Scheduling
 
-**Using a mechanistic interpretability probe as an inference-scheduling signal, not just a research metric.**
+A continuous-batching inference scheduler for `DeepSeek-R1-Distill-Qwen-7B` that routes requests using a linear probe on the model's own hidden states, rather than on request metadata alone.
 
-Renuka Oladri · MS Applied Machine Learning, University of Maryland
+## Overview
 
-**STATUS: novel combination — no published paper, codebase, or blog post wires a mechanistic probe into a serving scheduler's routing decision.**
+Reasoning models exhibit a bimodal failure pattern on hard math problems: generations either converge cleanly to an answer or enter a non-converging loop that runs to the token cap. [early_detection](../early_detection) showed that a linear probe on layer-16 hidden states, read at token 150 of the generation, predicts which outcome a given generation will have — AUC 0.612 vs. 0.445 for a behavioral-only baseline (p=0.001) in that project's original run.
 
----
+This project turns that signal into a scheduling decision. `src/gate.py` wires the probe into a continuous-batching scheduler (`src/scheduler.py`, adapted from [inference-server](https://github.com/oladri-renuka/inference-server)'s admit/decode/evict design and rebuilt around a real 7B HuggingFace model — see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)). At token 150 of every active generation, the gate classifies it `convergent` / `divergent` with a confidence score, and the scheduler acts on that classification under one of three strategies:
 
-## The Core Idea
-
-[early_detection](../early_detection) showed that a linear probe on
-DeepSeek-R1-Distill-Qwen-7B's layer-16 hidden state, read at token 150 of
-a reasoning chain, predicts whether that generation will converge cleanly
-or run away into a non-converging loop — **AUC 0.612 vs. 0.445 for a
-behavioral-only baseline, p=0.001** — days before the behavioral evidence
-(repetition, token count) becomes informative on its own.
-
-That result sat in a research repo as a number in a table. This project
-asks the obvious next question: **is that signal good enough to make a
-scheduling decision with?** `src/gate.py` wires the probe into
-[inference-server](https://github.com/oladri-renuka/inference-server)'s
-continuous-batching scheduler (adapted here for a real 7B HF model — see
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)). At token 150 of every
-active generation, the gate classifies it `convergent` / `divergent` with
-a confidence score, and the scheduler routes on that classification under
-one of three strategies:
-
-| Strategy | Behavior | Hypothesis |
-|---|---|---|
-| `baseline` | Standard continuous batching, routing_decision computed but ignored | Control condition |
-| `probe_terminate` | Divergent generations above 0.7 confidence are killed at token 150 | Saves compute on doomed generations, at the cost of some false terminations |
-| `probe_deprioritize` | Divergent generations are preempted (recompute-based) to free batch slots for waiting normal-priority requests, but never killed | Improves latency for likely-convergent requests without discarding any generation |
-
-**Hypothesis risk is real and stated up front.** The probe might not move
-throughput enough to matter, or the gate's own overhead (one forward hook
-read + one `sklearn` inference call per request, at exactly one tick each)
-might cancel out any scheduling win. Both outcomes are reported the same
-way — see "What a Null or Negative Result Looks Like" below.
+| Strategy | Behavior |
+|---|---|
+| `baseline` | Standard continuous batching. The routing decision is computed but never acted on — control condition. |
+| `probe_terminate` | Generations classified `divergent` above a 0.7 confidence threshold are terminated at token 150. |
+| `probe_deprioritize` | Generations classified `divergent` are deprioritized: preempted (recompute-based) to free batch slots for normal-priority requests once the batch is at capacity, but never discarded. |
 
 | | |
 |---|---|
-| **Target companies** | OpenAI (inference efficiency), Anthropic, Scale AI ML Systems |
-| **Hardware** | RunPod A5000 (24GB) — same as early_detection |
-| **Model** | `deepseek-ai/DeepSeek-R1-Distill-Qwen-7B` — same as early_detection |
-| **Dependencies** | Reuses early_detection's probe methodology (retrained/exported here — see `scripts/train_probe.py`) and inference-server's continuous-batching scheduler design |
-| **Repo name** | `probe-guided-inference` |
-
----
+| Model | `deepseek-ai/DeepSeek-R1-Distill-Qwen-7B` |
+| Probe | Layer 16, checkpoint 150 (logistic regression, fit in `scripts/train_probe.py`) |
+| Benchmark | 200 AIME problems, identical traffic across all three strategies |
+| Hardware tested | RunPod A40 (48GB) |
 
 ## Architecture
+
+![Architecture](docs/architecture.png)
 
 ```
 probe-guided-inference/
 ├── src/
-│   ├── config.py            # single source of truth: model, layer, checkpoint, thresholds, batch size
-│   ├── probe.py              # loads the fitted probe; registers the layer-16 forward hook
-│   ├── gate.py                # hidden state -> RoutingDecision(label, confidence)
-│   ├── queue.py               # GenerationRequest + RequestQueue (priority-aware requeue)
-│   ├── hf_cache_bridge.py     # batched KV-cache bridge for heterogeneous-length decode steps
-│   ├── model_runner.py        # bridges GenerationRequest <-> HF forward calls; fires the gate
-│   ├── scheduler.py           # ContinuousBatcher: admit / decode / route / evict
-│   └── server.py              # FastAPI: /generate, /stream, /health, /metrics
+│   ├── config.py             # model, layer, checkpoint, thresholds, batch size
+│   ├── probe.py               # loads the fitted probe; registers the layer-16 forward hook
+│   ├── gate.py                 # hidden state -> RoutingDecision(label, confidence)
+│   ├── queue.py                # GenerationRequest + RequestQueue (priority-aware requeue)
+│   ├── hf_cache_bridge.py      # batched KV-cache bridge for heterogeneous-length decode steps
+│   ├── model_runner.py         # bridges GenerationRequest <-> HF forward calls; fires the gate
+│   ├── scheduler.py            # ContinuousBatcher: admit / decode / route / evict
+│   └── server.py               # FastAPI: /generate, /stream, /health, /metrics
 ├── scripts/
-│   ├── train_probe.py         # fits + exports the probe artifact from early_detection's activations
-│   └── verify_setup.py        # pre-flight check: model, probe, hook, AND cache-bridge parity
+│   ├── train_probe.py          # fits + exports the probe artifact from early_detection's activations
+│   ├── verify_setup.py         # pre-flight check: model, probe, hook, cache-bridge parity
+│   ├── plot_results.py         # generates the figures in results/ from report_summary.json
+│   └── render_architecture_diagram.py
 ├── benchmark/
-│   ├── aime_loader.py         # same 200 AIME problems, same seed, as early_detection
-│   ├── routing_eval.py        # runs all 3 strategies against identical traffic
-│   └── report.py              # throughput / accuracy / token-savings / false-termination tables
-├── tests/                     # CPU-only, offline — see "Testing" below
-├── docs/ARCHITECTURE.md       # design decisions and why (start here for the "how")
-└── results/
+│   ├── aime_loader.py          # same 200 AIME problems, same seed, as early_detection
+│   ├── routing_eval.py         # runs all three strategies against identical traffic
+│   └── report.py               # throughput / accuracy / false-termination tables
+├── tests/                      # CPU-only, offline (see Testing)
+├── docs/ARCHITECTURE.md        # design decisions
+├── probe_weights/               # fitted probe artifact
+└── results/                     # benchmark output + figures
 ```
 
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the reasoning behind
-every non-obvious decision here — most importantly, why this project
-serves the model through unmodified HuggingFace `transformers` rather
-than hand-rolling Qwen2's forward pass the way inference-server hand-rolls
-GPT-2's (ADR 1), and how a batched KV-cache bridge was built on top of
-that constraint (ADR 2).
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design rationale behind each non-obvious decision — most significantly, why the model is served through unmodified HuggingFace `transformers` rather than a hand-rolled forward pass (ADR 1), how the batched KV-cache bridge is built on top of that constraint (ADR 2), and why `probe_deprioritize`'s preemption is recompute-based (ADR 4).
 
-## How Routing Actually Happens
+### Request lifecycle
 
 1. A request is admitted into the active batch (`ContinuousBatcher._try_admit`) and decoded one token at a time in a shared batched forward pass (`model_runner.run_decode_step`).
-2. The moment a request has generated exactly `checkpoint_position` (150) tokens, `src/gate.py`'s `ClassificationGate` reads that token's layer-16 hidden state (captured via a forward hook, `src/probe.py`) and classifies it. This happens **once per request**, not once per tick — the probe's runtime cost is a single `sklearn` inference call per generation, not a recurring per-token cost.
-3. `ContinuousBatcher._apply_routing` reacts to that decision according to the active strategy:
-   - `probe_terminate`: confidence-thresholded early termination.
-   - `probe_deprioritize`: sets `priority=1`; the request is only actually affected once the batch is at capacity and a normal-priority request is waiting, at which point the least-progressed deprioritized request is preempted (recompute-based — its progress is discarded and it restarts after requeueing) to free the slot. See ADR 4.
-4. `benchmark/routing_eval.py` runs all three strategies against the identical 200 AIME problems (same seed, same ordering as early_detection) and `benchmark/report.py` aggregates the comparison, including the two diagnostics the project explicitly calls for: probe_terminate's false-termination rate (measured against `baseline`'s untouched run of the same problems, since decoding is greedy/deterministic and gives a valid counterfactual — see that module's docstring) and probe_deprioritize's convergent-vs-divergent latency breakdown.
+2. The moment a request has generated its 150th token, `ClassificationGate` reads that token's layer-16 hidden state (captured via a forward hook in `probe.py`) and classifies it. This happens once per request, not once per tick.
+3. `ContinuousBatcher._apply_routing` reacts to the classification according to the active strategy — confidence-thresholded termination for `probe_terminate`, or a priority flag that triggers preemption under contention for `probe_deprioritize`.
+4. `benchmark/routing_eval.py` runs all three strategies against the identical 200 AIME problems, and `benchmark/report.py` aggregates the comparison, including `probe_terminate`'s false-termination rate (measured against `baseline`'s outcome for the same problems, since decoding is greedy and deterministic) and `probe_deprioritize`'s convergent-vs-divergent latency breakdown.
 
-## Definition of Done
-
-- [x] Probe artifact loads and the gate fires at exactly token 150 during live generation (`tests/test_gate.py`, `tests/test_scheduler_smoke.py`)
-- [x] Batched cache bridge is numerically verified against plain `model.generate()`, both single-sequence and multi-sequence with staggered admission/eviction (`tests/test_hf_cache_bridge.py`, `scripts/verify_setup.py`)
-- [x] All three strategies implemented against a shared scheduler core, unit- and integration-tested (`tests/test_scheduler_smoke.py`)
-- [x] Three strategies benchmarked on identical 200 AIME problems on an A40 (RunPod) — see "Results"
-- [x] Results table (throughput, accuracy, token savings, false-termination rate) populated with real numbers
-- [x] README's Results section replaced with the actual outcome — positive, negative, or null — and honest interpretation
-
-## What a Positive Result Looks Like
-
-`probe_deprioritize` improves p50 latency for predicted-convergent
-requests by 15–25% relative to `baseline`, with no accuracy loss and no
-drop in the divergent group's completion rate. This is the best case:
-probing buys faster responses for the requests most likely to succeed,
-without sacrificing anything on the harder ones.
-
-## What a Null or Negative Result Looks Like
-
-The gate's overhead (however small — one hook read plus one sklearn call
-per request) doesn't pay for itself if the probe's AUC isn't high enough
-to make routing decisions that matter at this batch size and contention
-level; or `probe_terminate`'s false-termination rate is too high to be
-worth the compute saved; or `probe_deprioritize`'s recompute-based
-preemption (ADR 4) costs the divergent group more wall-clock time than
-routing saves the convergent group. **Any of these is a complete,
-reportable finding** — early_detection's own AUC (0.612) was already
-flagged as "statistically significant, not obviously operationally
-decisive," and this project's job is to find out exactly where that
-line falls, not to manufacture a win.
-
-## Results
-
-Run on an A40 (48GB), 200 AIME problems, `max_batch_size=8`, seed=42 —
-identical traffic across all three strategies. Probe: layer 16, checkpoint
-150, fit fresh on this run's own `early_detection/generate.py` output
-(5-fold CV AUC **0.567 ± 0.051** — lower than early_detection's originally
-reported 0.612, within the noise band of a fresh 200-sample generation;
-see `scripts/train_probe.py`'s output for that run).
-
-| Strategy | Wall-clock (200 req) | Throughput (req/s) | Avg tokens/req | Accuracy (completed) | p50 latency | p95 latency |
-|---|---|---|---|---|---|---|
-| `baseline` | 36,636.6s (10.2h) | 0.005 | 6,939 | 59.0% | 17,249.9s | 35,225.4s |
-| `probe_terminate` | 24,460.2s (6.8h) | 0.008 | 4,657 | 66.0% | 10,937.2s | 23,385.4s |
-| `probe_deprioritize` | 36,964.5s (10.3h) | 0.005 | 6,987 | 59.5% | 16,385.8s | 35,077.4s |
-
-Full table, scheduler activity, and both diagnostics: `results/report.md`.
-
-### The finding: destructive vs. non-destructive routing decisions tolerate probe noise very differently
-
-**`probe_deprioritize` cleared its own positive-result bar, by a wide margin.**
-The pre-registered bar (see "What a Positive Result Looks Like" above) was
-+15–25% p50 improvement for predicted-convergent requests, no accuracy
-loss, divergent requests still completing at the same rate. The actual
-result:
-
-- Convergent-predicted p50: **10,112.6s vs. baseline's 18,323.9s for the
-  identical subset of requests — a 44.8% improvement**, nearly double the
-  upper end of the target.
-- Accuracy: 59.5% vs. baseline's 59.0% — no loss.
-- Completion rate: 200/200 either way — nothing is ever discarded, only
-  delayed.
-
-The cost is concentrated entirely in the divergent group's latency
-(p50 28,482.7s, from 75 recompute-based preemptions — ADR 4's predicted
-mechanism, showing up exactly where expected) and in aggregate wall-clock,
-which is a wash against `baseline` (36,964.5s vs. 36,636.6s). This is not
-a system-throughput win — it's a **prioritization** win: latency gets
-reallocated from likely-successful requests onto likely-doomed ones,
-which is precisely what "deprioritize" was designed to do, and it did it
-well past the bar this project set for itself before looking at the data.
-
-**`probe_terminate` did not clear a comparable bar, because its failure
-mode is destructive.** False termination rate: **47.5%** (28 of 59
-terminated requests would have converged, per `baseline`'s untouched run
-of the same problems — see `benchmark/report.py`'s ground-truth
-methodology). At a probe AUC of 0.567, that's close to a coin flip.
-Interestingly, `accuracy_on_completed` still rose (66.0% vs. baseline's
-59.0%) — even a noisy filter removes more true non-convergent cases
-(~10% conditional accuracy, per early_detection) than it wrongly removes
-convergent ones in absolute count — but that headline number obscures the
-real cost: 28 of 200 problems permanently lost an answer that would have
-been correct, with no way to recover it.
-
-**The honest conclusion isn't "does the probe work" — it's "which class
-of decision can a probe at this AUC level actually support."** A signal
-too noisy to justify discarding a generation outright (`probe_terminate`)
-is still reliable enough to justify de-prioritizing it (`probe_deprioritize`),
-because the two strategies have asymmetric failure costs: a wrong
-`probe_deprioritize` call costs time; a wrong `probe_terminate` call costs
-a correct answer, permanently. This is a mechanistically-grounded,
-statistically measured line between two failure regimes, not a single
-up-or-down verdict on "mechanistic probes for inference scheduling" —
-and it's a genuinely useful one for deciding how to deploy a probe at a
-given AUC in a real serving system.
-
-### Caveats on these numbers
-
-- **Single run, single seed.** No confidence intervals on the benchmark
-  metrics themselves (only the probe's own 5-fold CV AUC has one). The
-  false-termination rate (28/59) and the deprioritize latency delta are
-  point estimates from one 200-problem pass each.
-- **This run's probe (AUC 0.567) is weaker than early_detection's original
-  (0.612).** Both are draws from the same underlying methodology on a
-  fresh 200-sample generation; the gap is within plausible run-to-run
-  noise given early_detection's own documented variance across runs (see
-  that project's README "Sanity Check Against Original Project"), but it
-  means `probe_terminate`'s 47.5% false-termination rate is likely close
-  to a worst-case reading for this methodology, not a best case.
-- **A known performance inefficiency inflated wall-clock time across all
-  three strategies** (`src/hf_cache_bridge.py` rebuilds the full padded KV
-  cache every decode tick rather than only on admission/eviction — see
-  ADR 2 in `docs/ARCHITECTURE.md`). This affects the *absolute* wall-clock
-  numbers but not the *relative* comparison between strategies, since all
-  three pay the same per-tick tax under identical `max_batch_size`.
-
-## Reproduction
-
-### Hardware Requirements
-
-Same as early_detection: ≥24GB VRAM (A5000 or better), ~20GB disk for
-model weights + checkpoints.
-
-### Steps
+## Setup
 
 ```bash
-# 1. Setup
 git clone <this repo>
 cd probe-guided-inference
 bash setup_runpod.sh
 source venv/bin/activate
-
-# 2. Verify BEFORE spending GPU time on anything else -- catches config
-#    issues AND validates the batched cache bridge against model.generate()
-python scripts/verify_setup.py
-
-# 3. Train + export the probe artifact (early_detection must have already
-#    run its generate.py -- see that project's README)
-python scripts/train_probe.py --early-detection-dir ../early_detection
-
-# 4. Run all three strategies against the same 200 AIME problems
-python -m benchmark.routing_eval --out results/routing_eval.json
-
-# 5. Aggregate into the comparison table + false-termination /
-#    deprioritize-latency diagnostics
-python -m benchmark.report --in-path results/routing_eval.json --out results/report.md
 ```
 
-`Makefile` wraps each of these (`make verify`, `make train-probe`, `make
-benchmark`, `make report`).
+Requires a CUDA GPU with ≥24GB VRAM for the 7B model; ~20GB disk for model weights + checkpoints.
 
-### Testing
+## Usage
 
 ```bash
-pytest tests/ -v      # CPU-only, offline, ~0.5s -- no GPU, no model download
+# Pre-flight check: model, probe, hook, and cache-bridge parity against
+# model.generate() -- run before anything else on a new GPU.
+python scripts/verify_setup.py
+
+# Fit and export the probe from early_detection's activation checkpoints
+python scripts/train_probe.py --early-detection-dir ../early_detection
+
+# Run all three strategies against the same 200 AIME problems
+python -m benchmark.routing_eval --out results/routing_eval.json
+
+# Aggregate into tables + diagnostics
+python -m benchmark.report --in-path results/routing_eval.json --out results/report.md
+
+# Regenerate the figures below
+python scripts/plot_results.py
+```
+
+`Makefile` wraps each step (`make verify`, `make train-probe`, `make benchmark`, `make report`). To serve one strategy over HTTP:
+
+```bash
+PGI_STRATEGY=probe_deprioritize uvicorn src.server:app --host 0.0.0.0 --port 8000
+```
+
+## Results
+
+200 AIME problems, `max_batch_size=8`, seed 42, identical traffic across strategies. Probe: layer 16, checkpoint 150, 5-fold CV AUC 0.567 ± 0.051 on this run's own generation output.
+
+| Strategy | Wall-clock | Throughput | Avg tokens/req | Accuracy (completed) | p50 latency | p95 latency |
+|---|---|---|---|---|---|---|
+| `baseline` | 10.2h | 19.65 req/hr | 6,939 | 59.0% | 4.8h | 9.8h |
+| `probe_terminate` | 6.8h | 29.44 req/hr | 4,657 | 66.0% | 3.0h | 6.5h |
+| `probe_deprioritize` | 10.3h | 19.48 req/hr | 6,987 | 59.5% | 4.6h | 9.7h |
+
+![Latency comparison](results/latency_comparison.png)
+![Throughput, tokens, and accuracy](results/throughput_summary.png)
+
+### probe_deprioritize
+
+Convergent-predicted requests (n=126) saw a p50 latency of 2.8h, vs. 5.1h for the same requests under `baseline` — a **44.8% reduction**. Accuracy was unaffected (59.5% vs. 59.0%) and no request was dropped (200/200 finished either way). The cost is concentrated in the divergent-predicted group (n=74), whose p50 latency rose to 7.9h from 75 recompute-based preemptions. Aggregate wall-clock across all 200 requests is roughly unchanged from `baseline` (10.3h vs. 10.2h) — this strategy reallocates latency toward likely-successful requests rather than increasing total throughput.
+
+![Deprioritize latency breakdown](results/deprioritize_latency_breakdown.png)
+
+### probe_terminate
+
+Of the 59 requests terminated at token 150, 28 (47.5%) would have converged had they continued, per `baseline`'s run of the same problems. `accuracy_on_completed` still rose (66.0% vs. 59.0%) because the terminated set still skewed toward non-convergent generations (47.5% would-have-converged vs. 61.0% in the full population) — but a false-termination rate this close to 50% means roughly half of the compute saved comes at the cost of a discarded correct answer, with no way to recover it.
+
+![False termination breakdown](results/false_termination_breakdown.png)
+
+### Interpretation
+
+The two strategies tolerate the same probe very differently because their failure costs are asymmetric. A wrong `probe_deprioritize` decision costs time; a wrong `probe_terminate` decision permanently discards a correct answer. At this probe's AUC (0.567), that difference is enough to make one strategy a clear net positive and the other not defensible as implemented: reordering is robust to a noisy signal, termination is not.
+
+**Caveats**: single run, single seed — the false-termination rate (28/59) and the latency delta are point estimates, not confidence intervals. This run's probe AUC (0.567) is lower than early_detection's originally reported 0.612; both are within the variance that project documented across runs, but it means the `probe_terminate` result here is closer to a worst case for this methodology than a best case. Absolute wall-clock times are inflated by a known inefficiency in the KV-cache bridge (full cache rebuild every decode tick rather than only on admission/eviction — ADR 2); this affects all three strategies equally and does not change the relative comparison.
+
+## Testing
+
+```bash
+pytest tests/ -v
 ruff check .
 ```
 
-The test suite builds a real, tiny, randomly-initialized
-`Qwen2ForCausalLM` in-process (see `tests/conftest.py`) instead of
-downloading a checkpoint or hand-rolling a fake model — this exercises the
-exact `transformers` Cache API and attention code path the production
-model uses, so a bug in `src/hf_cache_bridge.py`'s padding/masking logic
-shows up here too, not just on the GPU with the real 7B model. It cannot
-and does not validate probe AUC or throughput numbers, which require the
-real model on a GPU (see "Reproduction").
-
----
-
-## Interview Talking Point
-
-> "I combined my mechanistic interpretability work with an inference
-> server to build a probe-guided scheduler. At token 150 of each
-> generation, a linear probe on layer-16 hidden states — AUC ~0.57-0.61,
-> not a strong signal — predicts whether a DeepSeek-R1 generation will
-> converge or loop. Routing on that signal, I found the same probe
-> supports two very different decisions very differently: deprioritizing
-> likely-divergent requests improved p50 latency for likely-convergent
-> ones by 44.8%, almost double my own pre-registered target, with zero
-> accuracy loss and zero requests dropped — because a wrong call there
-> just costs time. But outright terminating likely-divergent requests had
-> a 47.5% false-termination rate — because a wrong call there permanently
-> destroys a correct answer, and this probe isn't accurate enough to
-> justify that. So the finding isn't 'does the probe work' — it's that
-> the same signal's reliability threshold depends entirely on whether the
-> downstream decision is reversible. No existing system reasons about
-> mechanistic probes this way, because interpretability and inference
-> scheduling live in separate research communities. And before I trusted
-> any of these numbers, I built parity tests proving my custom batched
-> KV-cache bridge produces token-identical output to native `generate()`
-> — both alone and when multiple different-length sequences are decoded
-> together in the same batch."
+The test suite builds a real, randomly-initialized `Qwen2ForCausalLM` at a tiny size (`tests/conftest.py`) rather than downloading a checkpoint, so it runs offline in under a second while still exercising the production `transformers` Cache API and attention path. It validates scheduler and cache-bridge correctness; it does not validate probe AUC or throughput, which require the real model on a GPU.
 
 ## Limitations
 
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#known-limitations) for
-the full list — no paged attention (memory scales with batch size ×
-sequence length, not a fixed pool), greedy decoding only, recompute-based
-(not swap-based) preemption, and a probe AUC that early_detection itself
-already flagged as "significant, not decisive."
+- No paged attention — memory scales with `max_batch_size × sequence length`, not a fixed pool (see ADR 2).
+- Greedy decoding only.
+- Preemption is recompute-based, not swap-based (ADR 4); under sustained contention this can inflate the deprioritized group's total compute, not just its latency.
+- Single model, single hardware target; unvalidated beyond `DeepSeek-R1-Distill-Qwen-7B` on an A40/A5000-class GPU.
 
-## Extends
+Full list: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#known-limitations).
 
-This project builds directly on:
-- [early_detection](../early_detection) — the probe methodology and its validated AUC results
-- [inference-server](https://github.com/oladri-renuka/inference-server) — the continuous-batching scheduler design (admit/decode/evict tick loop, request queue, FastAPI serving pattern) this project adapts for a real HF model
+## Related projects
+
+- [early_detection](../early_detection) — the probe methodology and its original AUC results
+- [inference-server](https://github.com/oladri-renuka/inference-server) — the continuous-batching scheduler design this project adapts
 - [token-efficiency-math-reasoning](https://github.com/oladri-renuka/token-efficiency-math-reasoning) — the AIME dataset loader and bimodal-convergence framing both of the above build on
