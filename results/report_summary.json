@@ -1,0 +1,74 @@
+{
+  "baseline": {
+    "strategy": "baseline",
+    "n_requests": 200,
+    "wall_clock_s": 36636.59927511215,
+    "throughput_req_per_s": 0.0054590219604761,
+    "avg_tokens_per_request": 6939.285,
+    "accuracy_on_completed": 0.59,
+    "n_completed": 200,
+    "n_terminated": 0,
+    "convergence_rate": 0.61,
+    "latency_p50_s": 17249.909059643745,
+    "latency_p95_s": 35225.433235538,
+    "batcher_stats": {
+      "total_admitted": 200,
+      "total_finished": 200,
+      "total_probe_terminated": 0,
+      "total_preemptions": 0
+    }
+  },
+  "probe_terminate": {
+    "strategy": "probe_terminate",
+    "n_requests": 200,
+    "wall_clock_s": 24460.16101050377,
+    "throughput_req_per_s": 0.008176561058372236,
+    "avg_tokens_per_request": 4657.145,
+    "accuracy_on_completed": 0.6595744680851063,
+    "n_completed": 141,
+    "n_terminated": 59,
+    "convergence_rate": 0.46,
+    "latency_p50_s": 10937.198823571205,
+    "latency_p95_s": 23385.44458326101,
+    "batcher_stats": {
+      "total_admitted": 200,
+      "total_finished": 200,
+      "total_probe_terminated": 59,
+      "total_preemptions": 0
+    }
+  },
+  "probe_deprioritize": {
+    "strategy": "probe_deprioritize",
+    "n_requests": 200,
+    "wall_clock_s": 36964.52709531784,
+    "throughput_req_per_s": 0.005410592687531859,
+    "avg_tokens_per_request": 6986.61,
+    "accuracy_on_completed": 0.595,
+    "n_completed": 200,
+    "n_terminated": 0,
+    "convergence_rate": 0.595,
+    "latency_p50_s": 16385.75863301754,
+    "latency_p95_s": 35077.443575501435,
+    "batcher_stats": {
+      "total_admitted": 275,
+      "total_finished": 200,
+      "total_probe_terminated": 0,
+      "total_preemptions": 75
+    }
+  },
+  "_false_termination_rate": {
+    "n_terminated": 59,
+    "n_false_terminations": 28,
+    "false_termination_rate": 0.4745762711864407
+  },
+  "_deprioritize_latency_breakdown": {
+    "convergent_p50_s": 10112.601629972458,
+    "convergent_mean_s": 10224.326652451167,
+    "divergent_p50_s": 28482.69476878643,
+    "divergent_mean_s": 29072.66080202283,
+    "n_convergent": 126,
+    "n_divergent": 74,
+    "baseline_convergent_p50_s": 18323.850762844086,
+    "convergent_p50_improvement_pct": 44.81180969625591
+  }
+}
